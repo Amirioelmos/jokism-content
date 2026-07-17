@@ -18,6 +18,15 @@ type Bale struct {
 	base, token string
 }
 
+type BaleError struct {
+	StatusCode  int
+	Description string
+}
+
+func (e *BaleError) Error() string {
+	return fmt.Sprintf("خطای بله HTTP %d: %s", e.StatusCode, e.Description)
+}
+
 func (b *Bale) SendVideo(ctx context.Context, chat, path, caption string) error {
 	reader, writer := io.Pipe()
 	form := multipart.NewWriter(writer)
@@ -77,7 +86,7 @@ func (b *Bale) SendVideo(ctx context.Context, chat, path, caption string) error 
 	}
 	_ = json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&out)
 	if res.StatusCode/100 != 2 || !out.OK {
-		return fmt.Errorf("خطای بله HTTP %d: %s", res.StatusCode, out.Description)
+		return &BaleError{StatusCode: res.StatusCode, Description: out.Description}
 	}
 	return nil
 }
@@ -103,7 +112,7 @@ func (b *Bale) SendVideoURL(ctx context.Context, chat, videoURL, caption string)
 	}
 	_ = json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&out)
 	if res.StatusCode/100 != 2 || !out.OK {
-		return fmt.Errorf("خطای بله HTTP %d: %s", res.StatusCode, out.Description)
+		return &BaleError{StatusCode: res.StatusCode, Description: out.Description}
 	}
 	return nil
 }

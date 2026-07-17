@@ -117,7 +117,7 @@ func (a *App) enqueue(ctx context.Context) {
 	if !s.Enabled {
 		return
 	}
-	vs, e := a.aparat.Shorts(ctx, s.BatchCount)
+	vs, e := a.aparat.Shorts(ctx, s.BatchCount*4)
 	if e != nil {
 		a.fail(e)
 		return
@@ -159,7 +159,24 @@ func (a *App) process(ctx context.Context, j Job) {
 		return
 	}
 	s := a.store.get()
+	maxBytes := s.MaxVideoMB << 20
+	if maxBytes > 0 {
+		size, err := a.aparat.ContentLength(ctx, v)
+		if err != nil {
+			a.fail(err)
+			return
+		}
+		if size > maxBytes {
+			a.skip(v.ID, errors.New("حجم ویدیو بیشتر از سقف تنظیم‌شده است"))
+			return
+		}
+	}
 	if e = a.bale.SendVideoURL(ctx, s.ChannelID, v.DownloadURL, captionFor(v, s)); e != nil {
+		var be *BaleError
+		if errors.As(e, &be) && be.StatusCode == http.StatusRequestEntityTooLarge {
+			a.skip(v.ID, e)
+			return
+		}
 		a.fail(e)
 		return
 	}
@@ -168,6 +185,12 @@ func (a *App) process(ctx context.Context, j Job) {
 		return
 	}
 	a.stats.Sent.Add(1)
+}
+func (a *App) skip(id string, reason error) {
+	log.Printf("رد شد: %s: %v", id, reason)
+	if e := a.store.markSent(id); e != nil {
+		a.fail(e)
+	}
 }
 func (a *App) fail(e error) {
 	log.Printf("خطا: %v", e)

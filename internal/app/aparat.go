@@ -194,6 +194,27 @@ func (a *Aparat) Resolve(ctx context.Context, v Video) (Video, error) {
 	}
 	return v, nil
 }
+
+func (a *Aparat) ContentLength(ctx context.Context, v Video) (int64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, v.DownloadURL, nil)
+	if err != nil {
+		return -1, err
+	}
+	req.Header.Set("User-Agent", "JokismBot/1.0")
+	res, err := a.client.Do(req)
+	if err != nil {
+		return -1, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode == http.StatusMethodNotAllowed || res.StatusCode == http.StatusNotImplemented {
+		return -1, nil
+	}
+	if res.StatusCode/100 != 2 {
+		return -1, fmt.Errorf("بررسی حجم ویدیو HTTP %d", res.StatusCode)
+	}
+	return res.ContentLength, nil
+}
+
 func (a *Aparat) getJSON(ctx context.Context, u string, dst any) error {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	req.Header.Set("User-Agent", "JokismBot/1.0")
