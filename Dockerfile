@@ -10,5 +10,6 @@ RUN adduser -D -u 10001 app && mkdir /data && chown app:app /data
 USER app
 WORKDIR /data
 COPY --from=build /out/jokism /usr/local/bin/jokism
+COPY captions.txt /data/captions.txt
 EXPOSE 8080
 ENTRYPOINT ["jokism"]

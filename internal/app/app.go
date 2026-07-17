@@ -1,9 +1,12 @@
 package app
 
 import (
+	"bufio"
 	"context"
+	"crypto/rand"
 	"errors"
 	"log"
+	"math/big"
 	"net/http"
 	"os"
 	"strings"
@@ -30,6 +33,7 @@ type App struct {
 	cancel       context.CancelFunc
 	workersMu    sync.Mutex
 	workerCancel context.CancelFunc
+	captions     []string
 }
 
 func New() (*App, error) {
@@ -45,6 +49,10 @@ func New() (*App, error) {
 	if e != nil {
 		return nil, e
 	}
+	captions, e := loadCaptions(env("CAPTIONS_FILE", "captions.txt"))
+	if e != nil {
+		return nil, e
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	if dsn := strings.TrimSpace(os.Getenv("DATABASE_URL")); dsn != "" {
 		db, e := openDB(ctx, dsn)
@@ -55,7 +63,7 @@ func New() (*App, error) {
 		s.attachDB(db)
 	}
 	client := &http.Client{Timeout: 10 * time.Minute}
-	a := &App{store: s, jobs: make(chan Job, 100), root: ctx, cancel: cancel}
+	a := &App{store: s, jobs: make(chan Job, 100), root: ctx, cancel: cancel, captions: captions}
 	a.aparat = &Aparat{client: client, base: env("APARAT_BASE_URL", "https://www.aparat.com")}
 	a.bale = &Bale{client: client, base: env("BALE_API_BASE", "https://tapi.bale.ai"), token: token}
 	a.stats.LastError.Store("")
@@ -171,7 +179,7 @@ func (a *App) process(ctx context.Context, j Job) {
 			return
 		}
 	}
-	if e = a.bale.SendVideoURL(ctx, s.ChannelID, v.DownloadURL, captionFor(v, s)); e != nil {
+	if e = a.bale.SendVideoURL(ctx, s.ChannelID, v.DownloadURL, a.captionFor(s)); e != nil {
 		var be *BaleError
 		if errors.As(e, &be) && be.StatusCode == http.StatusRequestEntityTooLarge {
 			a.skip(v.ID, e)
@@ -198,16 +206,45 @@ func (a *App) fail(e error) {
 	a.stats.LastError.Store(e.Error())
 }
 
-func captionFor(v Video, s Settings) string {
-	parts := []string{}
-	if strings.TrimSpace(v.Title) != "" {
-		parts = append(parts, strings.TrimSpace(v.Title))
+func loadCaptions(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
 	}
-	if len(v.Hashtags) > 0 {
-		parts = append(parts, strings.Join(v.Hashtags, " "))
+	defer f.Close()
+	var out []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" {
+			out = append(out, line)
+		}
 	}
-	if strings.TrimSpace(s.ChannelLink) != "" {
-		parts = append(parts, strings.TrimSpace(s.ChannelLink))
+	return out, scanner.Err()
+}
+
+func (a *App) captionFor(s Settings) string {
+	channel := strings.TrimSpace(s.ChannelLink)
+	if len(a.captions) == 0 {
+		return channel
 	}
-	return strings.Join(parts, "\n\n")
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(len(a.captions))))
+	if err != nil {
+		return joinCaption(a.captions[time.Now().UnixNano()%int64(len(a.captions))], channel)
+	}
+	return joinCaption(a.captions[n.Int64()], channel)
+}
+
+func joinCaption(caption, channel string) string {
+	caption = strings.TrimSpace(caption)
+	if channel == "" {
+		return caption
+	}
+	if caption == "" {
+		return channel
+	}
+	return caption + "\n\n" + channel
 }
