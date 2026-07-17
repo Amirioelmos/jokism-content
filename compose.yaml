@@ -1,0 +1,29 @@
+services:
+  jokism:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    env_file: .env
+    volumes:
+      - jokism-data:/data
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-jokism}
+      POSTGRES_USER: ${POSTGRES_USER:-jokism}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jokism_password}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-jokism} -d $${POSTGRES_DB:-jokism}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+volumes:
+  jokism-data:
+  postgres-data:
