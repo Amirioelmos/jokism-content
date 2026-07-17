@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -62,7 +63,7 @@ func (a *Aparat) Search(ctx context.Context, topic string) ([]Video, error) {
 }
 
 func (a *Aparat) Shorts(ctx context.Context, count int) ([]Video, error) {
-	u := env("APARAT_SHORTS_API_BASE", "https://shorts.aparat.com/api") + "/v1/feed?bypass_cache=true"
+	u := env("APARAT_SHORTS_API_BASE", "https://shorts.aparat.com/api") + "/v1/web/explore"
 	var raw struct {
 		Data struct {
 			Posts []struct {
@@ -80,6 +81,7 @@ func (a *Aparat) Shorts(ctx context.Context, count int) ([]Video, error) {
 				} `json:"stats"`
 				ShortVideos []struct {
 					VideoLink string `json:"video_link"`
+					HLSLink   string `json:"hls_link"`
 				} `json:"short_videos"`
 			} `json:"posts"`
 		} `json:"data"`
@@ -87,9 +89,19 @@ func (a *Aparat) Shorts(ctx context.Context, count int) ([]Video, error) {
 	if err := a.getJSON(ctx, u, &raw); err != nil {
 		return nil, err
 	}
+	sort.SliceStable(raw.Data.Posts, func(i, j int) bool {
+		return raw.Data.Posts[i].Stats.Views > raw.Data.Posts[j].Stats.Views
+	})
 	out := make([]Video, 0, count)
 	for _, p := range raw.Data.Posts {
-		if p.Type != "short-video" || p.ID == "" || len(p.ShortVideos) == 0 || !strings.HasPrefix(p.ShortVideos[0].VideoLink, "http") {
+		if p.Type != "short-video" || p.ID == "" || len(p.ShortVideos) == 0 {
+			continue
+		}
+		videoLink := p.ShortVideos[0].VideoLink
+		if !strings.HasPrefix(videoLink, "http") && strings.HasPrefix(p.ShortVideos[0].HLSLink, "http") {
+			videoLink, _ = a.mp4FromHLS(ctx, p.ShortVideos[0].HLSLink)
+		}
+		if !strings.HasPrefix(videoLink, "http") {
 			continue
 		}
 		title := strings.TrimSpace(p.Description)
@@ -100,7 +112,7 @@ func (a *Aparat) Shorts(ctx context.Context, count int) ([]Video, error) {
 			title = title + "\nکانال: " + p.User.Name
 		}
 		page := "https://www.aparat.com/shorts/" + p.ID
-		out = append(out, Video{ID: p.ID, Title: title, PageURL: page, DownloadURL: p.ShortVideos[0].VideoLink, Hashtags: parseHashtags(p.Hashtags)})
+		out = append(out, Video{ID: p.ID, Title: title, PageURL: page, DownloadURL: videoLink, Hashtags: parseHashtags(p.Hashtags)})
 		if len(out) >= count {
 			return out, nil
 		}
@@ -109,6 +121,34 @@ func (a *Aparat) Shorts(ctx context.Context, count int) ([]Video, error) {
 		return nil, fmt.Errorf("در feed شورتز آپارات ویدیوی قابل ارسال پیدا نشد")
 	}
 	return out, nil
+}
+
+func (a *Aparat) mp4FromHLS(ctx context.Context, hls string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, hls, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "JokismBot/1.0")
+	res, err := a.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer res.Body.Close()
+	if res.StatusCode/100 != 2 {
+		return "", fmt.Errorf("HLS HTTP %d", res.StatusCode)
+	}
+	b, err := io.ReadAll(io.LimitReader(res.Body, 64<<10))
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "http") || !strings.Contains(line, ".mp4/chunk.m3u8") {
+			continue
+		}
+		return strings.Replace(line, ".mp4/chunk.m3u8", ".mp4", 1), nil
+	}
+	return "", fmt.Errorf("لینک mp4 از HLS پیدا نشد")
 }
 
 func parseHashtags(raw json.RawMessage) []string {
