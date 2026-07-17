@@ -12,7 +12,46 @@ import (
 var page = template.Must(template.New("admin").Parse(`<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>مدیریت Jokism</title><style>
 *{box-sizing:border-box}body{margin:0;background:#0f172a;color:#e2e8f0;font-family:Tahoma,Arial,sans-serif}.wrap{max-width:920px;margin:48px auto;padding:0 20px}h1{font-size:25px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px}.card{background:#1e293b;border:1px solid #334155;border-radius:14px;padding:18px;margin-bottom:16px}.stat{font-size:28px;color:#38bdf8}.muted{color:#94a3b8;font-size:13px}label{display:block;margin:12px 0 6px}input{width:100%;padding:11px;border:1px solid #475569;border-radius:8px;background:#0f172a;color:#fff}input[type=checkbox]{width:auto}button{margin-top:18px;border:0;border-radius:9px;padding:12px 22px;background:#0ea5e9;color:#fff;cursor:pointer}.ok{background:#14532d;padding:10px;border-radius:8px}.err{background:#7f1d1d;padding:10px;border-radius:8px}code{direction:ltr;display:inline-block}</style></head><body><main class="wrap"><h1>پنل مدیریت انتشار خودکار شورتز آپارات</h1>{{if .Message}}<p class="ok">{{.Message}}</p>{{end}}{{if .Error}}<p class="err">{{.Error}}</p>{{end}}<section class="grid"><div class="card"><div class="stat">{{.Queued}}</div><div class="muted">وارد صف شده</div></div><div class="card"><div class="stat">{{.Sent}}</div><div class="muted">ارسال موفق</div></div><div class="card"><div class="stat">{{.Failed}}</div><div class="muted">خطا</div></div></section><section class="card"><form method="post"><label>فاصله هر نوبت ارسال (دقیقه)</label><input type="number" min="1" max="1440" name="interval" value="{{.Settings.IntervalMinutes}}" required><label>تعداد شورتز در هر نوبت</label><input type="number" min="1" max="20" name="batch" value="{{.Settings.BatchCount}}" required><label>تعداد worker</label><input type="number" min="1" max="20" name="workers" value="{{.Settings.WorkerCount}}" required><label>شناسه کانال بله</label><input name="channel" value="{{.Settings.ChannelID}}" placeholder="@channel یا chat_id" required><label>لینک کانال بله برای کپشن</label><input name="channel_link" value="{{.Settings.ChannelLink}}" placeholder="https://ble.ir/..."><label>حداکثر حجم ویدیو (MB)</label><input type="number" min="1" max="2000" name="max_mb" value="{{.Settings.MaxVideoMB}}" required><label><input type="checkbox" name="enabled" {{if .Settings.Enabled}}checked{{end}}> انتشار فعال باشد</label><button>ذخیره تنظیمات</button></form></section>{{if .LastError}}<section class="card"><div class="muted">آخرین خطا</div><p>{{.LastError}}</p></section>{{end}}</main></body></html>`))
 
-func (a *App) routes() http.Handler { mux:=http.NewServeMux();mux.HandleFunc("/healthz",func(w http.ResponseWriter,r *http.Request){w.Header().Set("Content-Type","application/json");fmt.Fprint(w,`{"ok":true}`)});mux.Handle("/",a.auth(http.HandlerFunc(a.admin)));return mux }
-func (a *App) auth(next http.Handler)http.Handler{return http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){u,p,ok:=r.BasicAuth();eu,ep:=env("ADMIN_USER","admin"),env("ADMIN_PASSWORD","");valid:=ok&&ep!=""&&subtle.ConstantTimeCompare([]byte(u),[]byte(eu))==1&&subtle.ConstantTimeCompare([]byte(p),[]byte(ep))==1;if !valid{w.Header().Set("WWW-Authenticate",`Basic realm="admin"`);http.Error(w,"ورود مدیر لازم است",http.StatusUnauthorized);return};next.ServeHTTP(w,r)})}
-func (a *App) admin(w http.ResponseWriter,r *http.Request){data:=struct{Settings Settings;Queued,Sent,Failed int64;LastError,Message,Error string}{Settings:a.store.get(),Queued:a.stats.Queued.Load(),Sent:a.stats.Sent.Load(),Failed:a.stats.Failed.Load(),LastError:a.stats.LastError.Load().(string)};if r.Method==http.MethodPost{_ = r.ParseForm();v:=Settings{Topic:"",IntervalMinutes:number(r.FormValue("interval")),WorkerCount:number(r.FormValue("workers")),ChannelID:strings.TrimSpace(r.FormValue("channel")),ChannelLink:strings.TrimSpace(r.FormValue("channel_link")),MaxVideoMB:int64(number(r.FormValue("max_mb"))),BatchCount:number(r.FormValue("batch")),Enabled:r.FormValue("enabled")=="on"};if e:=a.store.update(v);e!=nil{data.Error=e.Error()}else{a.resizeWorkers();data.Settings=v;data.Message="تنظیمات ذخیره شد"}};w.Header().Set("Content-Type","text/html; charset=utf-8");_ = page.Execute(w,data)}
-func number(s string)int{n,_:=strconv.Atoi(s);return n}
+func (a *App) routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"ok":true}`)
+	})
+	mux.Handle("/", a.auth(http.HandlerFunc(a.admin)))
+	return mux
+}
+func (a *App) auth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u, p, ok := r.BasicAuth()
+		eu, ep := env("ADMIN_USER", "admin"), env("ADMIN_PASSWORD", "")
+		valid := ok && ep != "" && subtle.ConstantTimeCompare([]byte(u), []byte(eu)) == 1 && subtle.ConstantTimeCompare([]byte(p), []byte(ep)) == 1
+		if !valid {
+			w.Header().Set("WWW-Authenticate", `Basic realm="admin"`)
+			http.Error(w, "ورود مدیر لازم است", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+func (a *App) admin(w http.ResponseWriter, r *http.Request) {
+	data := struct {
+		Settings                  Settings
+		Queued, Sent, Failed      int64
+		LastError, Message, Error string
+	}{Settings: a.store.get(), Queued: a.stats.Queued.Load(), Sent: a.stats.Sent.Load(), Failed: a.stats.Failed.Load(), LastError: a.stats.LastError.Load().(string)}
+	if r.Method == http.MethodPost {
+		_ = r.ParseForm()
+		v := Settings{Topic: "", IntervalMinutes: number(r.FormValue("interval")), WorkerCount: number(r.FormValue("workers")), ChannelID: strings.TrimSpace(r.FormValue("channel")), ChannelLink: strings.TrimSpace(r.FormValue("channel_link")), MaxVideoMB: int64(number(r.FormValue("max_mb"))), BatchCount: number(r.FormValue("batch")), Enabled: r.FormValue("enabled") == "on"}
+		if e := a.store.update(v); e != nil {
+			data.Error = e.Error()
+		} else {
+			a.resizeWorkers()
+			data.Settings = v
+			data.Message = "تنظیمات ذخیره شد"
+		}
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = page.Execute(w, data)
+}
+func number(s string) int { n, _ := strconv.Atoi(s); return n }
