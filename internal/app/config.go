@@ -23,6 +23,11 @@ type Settings struct {
 	Enabled         bool   `json:"enabled"`
 	MaxVideoMB      int64  `json:"max_video_mb"`
 	BatchCount      int    `json:"batch_count"`
+	MusicChannelID  string `json:"music_channel_id"`
+	MusicChannelTag string `json:"music_channel_tag"`
+	MusicInterval   int    `json:"music_interval_minutes"`
+	MusicBatchCount int    `json:"music_batch_count"`
+	MaxAudioMB      int64  `json:"max_audio_mb"`
 }
 
 func defaults() Settings {
@@ -35,6 +40,11 @@ func defaults() Settings {
 		Enabled:         true,
 		MaxVideoMB:      int64(envInt("MAX_VIDEO_MB", 45)),
 		BatchCount:      envInt("BATCH_COUNT", 6),
+		MusicChannelID:  strings.TrimSpace(os.Getenv("MUSIC_BALE_CHANNEL_ID")),
+		MusicChannelTag: strings.TrimSpace(env("MUSIC_BALE_CHANNEL_TAG", "@jokism_music")),
+		MusicInterval:   envInt("MUSIC_INTERVAL_MINUTES", 30),
+		MusicBatchCount: envInt("MUSIC_BATCH_COUNT", 1),
+		MaxAudioMB:      int64(envInt("MAX_AUDIO_MB", 30)),
 	}
 }
 
@@ -53,6 +63,15 @@ func (s Settings) validate() error {
 	}
 	if s.BatchCount < 1 || s.BatchCount > 20 {
 		return errors.New("تعداد ویدیو در هر نوبت باید بین ۱ تا ۲۰ باشد")
+	}
+	if s.MusicInterval < 1 || s.MusicInterval > 1440 {
+		return errors.New("فاصله ارسال موزیک باید بین ۱ تا ۱۴۴۰ دقیقه باشد")
+	}
+	if s.MusicBatchCount < 1 || s.MusicBatchCount > 20 {
+		return errors.New("تعداد موزیک در هر نوبت باید بین ۱ تا ۲۰ باشد")
+	}
+	if s.MaxAudioMB < 1 || s.MaxAudioMB > 2000 {
+		return errors.New("حداکثر حجم موزیک نامعتبر است")
 	}
 	return nil
 }

@@ -42,7 +42,15 @@ func (a *App) admin(w http.ResponseWriter, r *http.Request) {
 	}{Settings: a.store.get(), Queued: a.stats.Queued.Load(), Sent: a.stats.Sent.Load(), Failed: a.stats.Failed.Load(), LastError: a.stats.LastError.Load().(string)}
 	if r.Method == http.MethodPost {
 		_ = r.ParseForm()
-		v := Settings{Topic: "", IntervalMinutes: number(r.FormValue("interval")), WorkerCount: number(r.FormValue("workers")), ChannelID: strings.TrimSpace(r.FormValue("channel")), ChannelLink: strings.TrimSpace(r.FormValue("channel_link")), MaxVideoMB: int64(number(r.FormValue("max_mb"))), BatchCount: number(r.FormValue("batch")), Enabled: r.FormValue("enabled") == "on"}
+		v := data.Settings
+		v.Topic = ""
+		v.IntervalMinutes = number(r.FormValue("interval"))
+		v.WorkerCount = number(r.FormValue("workers"))
+		v.ChannelID = strings.TrimSpace(r.FormValue("channel"))
+		v.ChannelLink = strings.TrimSpace(r.FormValue("channel_link"))
+		v.MaxVideoMB = int64(number(r.FormValue("max_mb")))
+		v.BatchCount = number(r.FormValue("batch"))
+		v.Enabled = r.FormValue("enabled") == "on"
 		if e := a.store.update(v); e != nil {
 			data.Error = e.Error()
 		} else {

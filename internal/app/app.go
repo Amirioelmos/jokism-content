@@ -16,6 +16,7 @@ import (
 )
 
 type Job struct{ Video Video }
+type MusicJob struct{ Track Track }
 type Stats struct {
 	Queued    atomic.Int64
 	Sent      atomic.Int64
@@ -25,8 +26,10 @@ type Stats struct {
 type App struct {
 	store        *Store
 	aparat       *Aparat
+	music        *MusicFa
 	bale         *Bale
 	jobs         chan Job
+	musicJobs    chan MusicJob
 	stats        Stats
 	server       *http.Server
 	root         context.Context
@@ -63,8 +66,9 @@ func New() (*App, error) {
 		s.attachDB(db)
 	}
 	client := &http.Client{Timeout: 10 * time.Minute}
-	a := &App{store: s, jobs: make(chan Job, 100), root: ctx, cancel: cancel, captions: captions}
+	a := &App{store: s, jobs: make(chan Job, 100), musicJobs: make(chan MusicJob, 100), root: ctx, cancel: cancel, captions: captions}
 	a.aparat = &Aparat{client: client, base: env("APARAT_BASE_URL", "https://www.aparat.com")}
+	a.music = &MusicFa{client: client, base: env("MUSIC_BASE_URL", "https://musics-fa.com")}
 	a.bale = &Bale{client: client, base: env("BALE_API_BASE", "https://tapi.bale.ai"), token: token}
 	a.stats.LastError.Store("")
 	a.server = &http.Server{Addr: env("LISTEN_ADDR", ":8080"), Handler: a.routes(), ReadHeaderTimeout: 10 * time.Second}
@@ -81,6 +85,7 @@ func (a *App) Run(ctx context.Context) error {
 	defer a.store.close()
 	a.resizeWorkers()
 	go a.scheduler(ctx)
+	go a.musicScheduler(ctx)
 	go func() {
 		<-ctx.Done()
 		a.cancel()
@@ -105,6 +110,7 @@ func (a *App) resizeWorkers() {
 	a.workerCancel = cancel
 	for i := 0; i < a.store.get().WorkerCount; i++ {
 		go a.worker(ctx, i+1)
+		go a.musicWorker(ctx, i+1)
 	}
 }
 func (a *App) scheduler(ctx context.Context) {
@@ -120,6 +126,21 @@ func (a *App) scheduler(ctx context.Context) {
 		}
 	}
 }
+
+func (a *App) musicScheduler(ctx context.Context) {
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			a.enqueueMusic(ctx)
+			timer.Reset(time.Duration(a.store.get().MusicInterval) * time.Minute)
+		}
+	}
+}
+
 func (a *App) enqueue(ctx context.Context) {
 	s := a.store.get()
 	if !s.Enabled {
@@ -147,6 +168,35 @@ func (a *App) enqueue(ctx context.Context) {
 		}
 	}
 }
+
+func (a *App) enqueueMusic(ctx context.Context) {
+	s := a.store.get()
+	if !s.Enabled || strings.TrimSpace(s.MusicChannelID) == "" {
+		return
+	}
+	tracks, e := a.music.Latest(ctx, s.MusicBatchCount*4)
+	if e != nil {
+		a.fail(e)
+		return
+	}
+	queued := 0
+	for _, track := range tracks {
+		if !a.store.wasSent("music:" + track.ID) {
+			select {
+			case a.musicJobs <- MusicJob{track}:
+				a.stats.Queued.Add(1)
+				queued++
+				if queued >= s.MusicBatchCount {
+					return
+				}
+			default:
+				a.fail(errors.New("صف موزیک پر است"))
+				return
+			}
+		}
+	}
+}
+
 func (a *App) worker(ctx context.Context, id int) {
 	for {
 		select {
@@ -157,6 +207,18 @@ func (a *App) worker(ctx context.Context, id int) {
 		}
 	}
 }
+
+func (a *App) musicWorker(ctx context.Context, id int) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case j := <-a.musicJobs:
+			a.processMusic(ctx, j)
+		}
+	}
+}
+
 func (a *App) process(ctx context.Context, j Job) {
 	if a.store.wasSent(j.Video.ID) {
 		return
@@ -194,12 +256,69 @@ func (a *App) process(ctx context.Context, j Job) {
 	}
 	a.stats.Sent.Add(1)
 }
+
+func (a *App) processMusic(ctx context.Context, j MusicJob) {
+	id := "music:" + j.Track.ID
+	if a.store.wasSent(id) {
+		return
+	}
+	s := a.store.get()
+	maxBytes := s.MaxAudioMB << 20
+	if maxBytes > 0 {
+		size, err := contentLength(ctx, a.music.client, j.Track.AudioURL)
+		if err != nil {
+			a.fail(err)
+			return
+		}
+		if size > maxBytes {
+			a.skip(id, errors.New("حجم موزیک بیشتر از سقف تنظیم‌شده است"))
+			return
+		}
+	}
+	caption := musicCaption(j.Track, s)
+	if e := a.bale.SendAudioURL(ctx, s.MusicChannelID, j.Track.AudioURL, caption, j.Track.Song, j.Track.Artist); e != nil {
+		var be *BaleError
+		if errors.As(e, &be) && be.StatusCode == http.StatusRequestEntityTooLarge {
+			a.skip(id, e)
+			return
+		}
+		a.fail(e)
+		return
+	}
+	if e := a.store.markSent(id); e != nil {
+		a.fail(e)
+		return
+	}
+	a.stats.Sent.Add(1)
+}
+
 func (a *App) skip(id string, reason error) {
 	log.Printf("رد شد: %s: %v", id, reason)
 	if e := a.store.markSent(id); e != nil {
 		a.fail(e)
 	}
 }
+
+func contentLength(ctx context.Context, client *http.Client, link string) (int64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, link, nil)
+	if err != nil {
+		return -1, err
+	}
+	req.Header.Set("User-Agent", "JokismBot/1.0")
+	res, err := client.Do(req)
+	if err != nil {
+		return -1, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode == http.StatusMethodNotAllowed || res.StatusCode == http.StatusNotImplemented {
+		return -1, nil
+	}
+	if res.StatusCode/100 != 2 {
+		return -1, errors.New("بررسی حجم فایل ناموفق بود")
+	}
+	return res.ContentLength, nil
+}
+
 func (a *App) fail(e error) {
 	log.Printf("خطا: %v", e)
 	a.stats.Failed.Add(1)
@@ -247,4 +366,15 @@ func joinCaption(caption, channel string) string {
 		return channel
 	}
 	return caption + "\n\n" + channel
+}
+
+func musicCaption(t Track, s Settings) string {
+	parts := []string{}
+	if t.Title != "" {
+		parts = append(parts, "🎵 "+t.Title)
+	}
+	if tag := strings.TrimSpace(s.MusicChannelTag); tag != "" {
+		parts = append(parts, tag)
+	}
+	return strings.Join(parts, "\n\n")
 }
