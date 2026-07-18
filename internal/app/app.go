@@ -26,7 +26,8 @@ type Stats struct {
 type App struct {
 	store        *Store
 	aparat       *Aparat
-	music        *MusicFa
+	music        MusicSource
+	client       *http.Client
 	bale         *Bale
 	jobs         chan Job
 	musicJobs    chan MusicJob
@@ -66,9 +67,9 @@ func New() (*App, error) {
 		s.attachDB(db)
 	}
 	client := &http.Client{Timeout: 10 * time.Minute}
-	a := &App{store: s, jobs: make(chan Job, 100), musicJobs: make(chan MusicJob, 100), root: ctx, cancel: cancel, captions: captions}
+	a := &App{store: s, jobs: make(chan Job, 100), musicJobs: make(chan MusicJob, 100), root: ctx, cancel: cancel, captions: captions, client: client}
 	a.aparat = &Aparat{client: client, base: env("APARAT_BASE_URL", "https://www.aparat.com")}
-	a.music = &MusicFa{client: client, base: env("MUSIC_BASE_URL", "https://musics-fa.com")}
+	a.music = NewMusicSource(client)
 	a.bale = &Bale{client: client, base: env("BALE_API_BASE", "https://tapi.bale.ai"), token: token}
 	a.stats.LastError.Store("")
 	a.server = &http.Server{Addr: env("LISTEN_ADDR", ":8080"), Handler: a.routes(), ReadHeaderTimeout: 10 * time.Second}
@@ -265,7 +266,7 @@ func (a *App) processMusic(ctx context.Context, j MusicJob) {
 	s := a.store.get()
 	maxBytes := s.MaxAudioMB << 20
 	if maxBytes > 0 {
-		size, err := contentLength(ctx, a.music.client, j.Track.AudioURL)
+		size, err := contentLength(ctx, a.client, j.Track.AudioURL)
 		if err != nil {
 			a.fail(err)
 			return
@@ -275,7 +276,18 @@ func (a *App) processMusic(ctx context.Context, j MusicJob) {
 			return
 		}
 	}
-	if e := a.bale.SendAudioURL(ctx, s.MusicChannelID, j.Track.AudioURL, musicCaption(j.Track, s), musicTitle(j.Track), "Jokism Music", j.Track.CoverURL); e != nil {
+	if cover := strings.TrimSpace(j.Track.CoverURL); cover != "" {
+		if e := a.bale.SendPhotoURL(ctx, s.MusicChannelID, cover, musicCaption(j.Track, s)); e != nil {
+			var be *BaleError
+			if errors.As(e, &be) && be.StatusCode == http.StatusRequestEntityTooLarge {
+				a.skip(id, e)
+				return
+			}
+			a.fail(e)
+			return
+		}
+	}
+	if e := a.bale.SendAudioURL(ctx, s.MusicChannelID, j.Track.AudioURL, musicAudioCaption(s), musicTitle(j.Track), "Jokism Music", j.Track.CoverURL); e != nil {
 		var be *BaleError
 		if errors.As(e, &be) && be.StatusCode == http.StatusRequestEntityTooLarge {
 			a.skip(id, e)
@@ -386,6 +398,10 @@ func musicCaption(t Track, s Settings) string {
 		parts = append(parts, tag)
 	}
 	return strings.Join(parts, "\n")
+}
+
+func musicAudioCaption(s Settings) string {
+	return strings.TrimSpace(s.MusicChannelTag)
 }
 
 func valueOrDash(s string) string {

@@ -117,6 +117,34 @@ func (b *Bale) SendVideoURL(ctx context.Context, chat, videoURL, caption string)
 	return nil
 }
 
+func (b *Bale) SendPhotoURL(ctx context.Context, chat, photoURL, caption string) error {
+	form := url.Values{}
+	form.Set("chat_id", chat)
+	form.Set("photo", photoURL)
+	if caption != "" {
+		form.Set("caption", caption)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.base+"/bot"+b.token+"/sendPhoto", strings.NewReader(form.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	res, err := b.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	var out struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	_ = json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&out)
+	if res.StatusCode/100 != 2 || !out.OK {
+		return &BaleError{StatusCode: res.StatusCode, Description: out.Description}
+	}
+	return nil
+}
+
 func (b *Bale) SendAudioURL(ctx context.Context, chat, audioURL, caption, title, performer, thumbURL string) error {
 	form := url.Values{}
 	form.Set("chat_id", chat)
