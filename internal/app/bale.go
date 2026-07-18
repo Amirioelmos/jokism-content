@@ -117,7 +117,7 @@ func (b *Bale) SendVideoURL(ctx context.Context, chat, videoURL, caption string)
 	return nil
 }
 
-func (b *Bale) SendAudioURL(ctx context.Context, chat, audioURL, caption, title, performer string) error {
+func (b *Bale) SendAudioURL(ctx context.Context, chat, audioURL, caption, title, performer, thumbURL string) error {
 	form := url.Values{}
 	form.Set("chat_id", chat)
 	form.Set("audio", audioURL)
@@ -127,6 +127,9 @@ func (b *Bale) SendAudioURL(ctx context.Context, chat, audioURL, caption, title,
 	}
 	if performer != "" {
 		form.Set("performer", performer)
+	}
+	if thumbURL != "" {
+		form.Set("thumb", thumbURL)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.base+"/bot"+b.token+"/sendAudio", strings.NewReader(form.Encode()))
 	if err != nil {

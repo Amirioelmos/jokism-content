@@ -11,7 +11,7 @@ import (
 )
 
 type Track struct {
-	ID, Title, Artist, Song, PageURL, AudioURL, CoverURL string
+	ID, Title, Artist, Song, Genre, PageURL, AudioURL, CoverURL string
 }
 
 type MusicFa struct {
@@ -24,6 +24,7 @@ var (
 	attrRE         = regexp.MustCompile(`\s([a-zA-Z0-9_-]+)=['"]([^'"]*)['"]`)
 	linkRE         = regexp.MustCompile(`href=["']([^"']+)["']`)
 	audioRE        = regexp.MustCompile(`data-song=["']([^"']+\.mp3[^"']*)["']`)
+	tagRE          = regexp.MustCompile(`<a[^>]+rel=["']tag["'][^>]*>([^<]+)</a>`)
 )
 
 func (m *MusicFa) Latest(ctx context.Context, limit int) ([]Track, error) {
@@ -81,6 +82,9 @@ func parseTrack(article string) Track {
 	}
 	if m := linkRE.FindStringSubmatch(article); len(m) > 1 {
 		t.PageURL = cleanText(m[1])
+	}
+	if m := tagRE.FindStringSubmatch(article); len(m) > 1 {
+		t.Genre = cleanText(m[1])
 	}
 	t.Title = strings.TrimSpace(strings.Join([]string{t.Artist, t.Song}, " - "))
 	if t.Title == "-" {
