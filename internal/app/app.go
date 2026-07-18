@@ -378,11 +378,9 @@ func musicTitle(t Track) string {
 func musicCaption(t Track, s Settings) string {
 	artist := valueOrDash(t.Artist)
 	song := valueOrDash(t.Song)
-	genre := valueOrDash(t.Genre)
 	parts := []string{
 		"اسم خواننده: " + artist,
 		"اسم آهنگ: " + song,
-		"سبک: " + genre,
 	}
 	if tag := strings.TrimSpace(s.MusicChannelTag); tag != "" {
 		parts = append(parts, tag)
