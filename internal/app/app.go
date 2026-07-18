@@ -275,8 +275,7 @@ func (a *App) processMusic(ctx context.Context, j MusicJob) {
 			return
 		}
 	}
-	caption := musicCaption(j.Track, s)
-	if e := a.bale.SendAudioURL(ctx, s.MusicChannelID, j.Track.AudioURL, caption, j.Track.Song, j.Track.Artist); e != nil {
+	if e := a.bale.SendAudioURL(ctx, s.MusicChannelID, j.Track.AudioURL, "", musicTitle(j.Track), "Jokism Music"); e != nil {
 		var be *BaleError
 		if errors.As(e, &be) && be.StatusCode == http.StatusRequestEntityTooLarge {
 			a.skip(id, e)
@@ -368,13 +367,10 @@ func joinCaption(caption, channel string) string {
 	return caption + "\n\n" + channel
 }
 
-func musicCaption(t Track, s Settings) string {
-	parts := []string{}
-	if t.Title != "" {
-		parts = append(parts, "🎵 "+t.Title)
+func musicTitle(t Track) string {
+	artist := strings.TrimSpace(t.Artist)
+	if artist == "" {
+		artist = "Jokism"
 	}
-	if tag := strings.TrimSpace(s.MusicChannelTag); tag != "" {
-		parts = append(parts, tag)
-	}
-	return strings.Join(parts, "\n\n")
+	return artist + " - Jokism Music"
 }

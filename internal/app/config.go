@@ -24,7 +24,6 @@ type Settings struct {
 	MaxVideoMB      int64  `json:"max_video_mb"`
 	BatchCount      int    `json:"batch_count"`
 	MusicChannelID  string `json:"music_channel_id"`
-	MusicChannelTag string `json:"music_channel_tag"`
 	MusicInterval   int    `json:"music_interval_minutes"`
 	MusicBatchCount int    `json:"music_batch_count"`
 	MaxAudioMB      int64  `json:"max_audio_mb"`
@@ -41,7 +40,6 @@ func defaults() Settings {
 		MaxVideoMB:      int64(envInt("MAX_VIDEO_MB", 45)),
 		BatchCount:      envInt("BATCH_COUNT", 6),
 		MusicChannelID:  strings.TrimSpace(os.Getenv("MUSIC_BALE_CHANNEL_ID")),
-		MusicChannelTag: strings.TrimSpace(env("MUSIC_BALE_CHANNEL_TAG", "@jokism_music")),
 		MusicInterval:   envInt("MUSIC_INTERVAL_MINUTES", 30),
 		MusicBatchCount: envInt("MUSIC_BATCH_COUNT", 1),
 		MaxAudioMB:      int64(envInt("MAX_AUDIO_MB", 30)),
