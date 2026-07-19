@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -25,6 +26,7 @@ type MusicSource interface {
 type MusicClient struct {
 	client *http.Client
 	base   string
+	pick   func(int) int
 }
 
 var (
@@ -45,13 +47,13 @@ func NewMusicSource(client *http.Client) MusicSource {
 	provider := strings.ToLower(strings.TrimSpace(env("MUSIC_PROVIDER", "itunes")))
 	switch provider {
 	case "musics-fa", "musicfa", "musicsfa":
-		return &MusicClient{client: client, base: env("MUSIC_BASE_URL", "https://musics-fa.com")}
+		return &MusicClient{client: client, base: env("MUSIC_BASE_URL", "https://musics-fa.com"), pick: rand.Intn}
 	case "radiojavan", "radio-javan", "rj":
-		return &MusicClient{client: client, base: env("MUSIC_BASE_URL", "https://www.radiojavan.com")}
+		return &MusicClient{client: client, base: env("MUSIC_BASE_URL", "https://www.radiojavan.com"), pick: rand.Intn}
 	case "iraniandj", "iranian-dj":
-		return &MusicClient{client: client, base: env("MUSIC_BASE_URL", "https://pro.iraniandj.ir")}
+		return &MusicClient{client: client, base: env("MUSIC_BASE_URL", "https://pro.iraniandj.ir"), pick: rand.Intn}
 	default:
-		return &MusicClient{client: client, base: env("MUSIC_BASE_URL", "https://api.itunes.ir")}
+		return &MusicClient{client: client, base: env("MUSIC_BASE_URL", "https://api.itunes.ir"), pick: rand.Intn}
 	}
 }
 
@@ -118,6 +120,7 @@ type wpPost struct {
 }
 
 type itunesTrackList struct {
+	Count   int           `json:"count"`
 	Results []itunesTrack `json:"results"`
 }
 
@@ -142,13 +145,45 @@ type itunesSinger struct {
 
 func (m *MusicClient) latestITunes(ctx context.Context, limit int) ([]Track, error) {
 	u := env("MUSIC_SOURCE_URL", m.base+"/v1/cnt/track/?page_size=20")
-	body, err := m.get(ctx, u, 24<<20)
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return nil, err
+	}
+	query := parsed.Query()
+	query.Del("genre")
+	if limit > 0 {
+		query.Set("page_size", fmt.Sprintf("%d", limit))
+	}
+	parsed.RawQuery = query.Encode()
+	body, err := m.get(ctx, parsed.String(), 24<<20)
 	if err != nil {
 		return nil, err
 	}
 	var list itunesTrackList
 	if err := json.Unmarshal(body, &list); err != nil {
 		return nil, err
+	}
+	pageSize := limit
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	pageCount := (list.Count + pageSize - 1) / pageSize
+	if pageCount > 1 {
+		pick := m.pick
+		if pick == nil {
+			pick = rand.Intn
+		}
+		// Page one was only used to discover pagination. Pull music from one
+		// of the other public track-list pages, without applying a category.
+		query.Set("page", fmt.Sprintf("%d", 2+pick(pageCount-1)))
+		parsed.RawQuery = query.Encode()
+		body, err = m.get(ctx, parsed.String(), 24<<20)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(body, &list); err != nil {
+			return nil, err
+		}
 	}
 	out := make([]Track, 0, limit)
 	for _, item := range list.Results {

@@ -37,6 +37,7 @@ type App struct {
 	cancel       context.CancelFunc
 	workersMu    sync.Mutex
 	workerCancel context.CancelFunc
+	musicRetryMu sync.Mutex
 	captions     []string
 }
 
@@ -66,7 +67,9 @@ func New() (*App, error) {
 		}
 		s.attachDB(db)
 	}
-	client := &http.Client{Timeout: 10 * time.Minute}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSHandshakeTimeout = time.Duration(envInt("HTTP_TLS_HANDSHAKE_SECONDS", 60)) * time.Second
+	client := &http.Client{Transport: transport, Timeout: 10 * time.Minute}
 	a := &App{store: s, jobs: make(chan Job, 100), musicJobs: make(chan MusicJob, 100), root: ctx, cancel: cancel, captions: captions, client: client}
 	a.aparat = &Aparat{client: client, base: env("APARAT_BASE_URL", "https://www.aparat.com")}
 	a.music = NewMusicSource(client)
@@ -136,7 +139,7 @@ func (a *App) musicScheduler(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
-			a.enqueueMusic(ctx)
+			a.enqueueMusicUntilQueued(ctx)
 			timer.Reset(time.Duration(a.store.get().MusicInterval) * time.Minute)
 		}
 	}
@@ -147,7 +150,11 @@ func (a *App) enqueue(ctx context.Context) {
 	if !s.Enabled {
 		return
 	}
-	vs, e := a.aparat.Shorts(ctx, s.BatchCount*4)
+	fetchLimit := s.BatchCount * 4
+	if fetchLimit < 20 {
+		fetchLimit = 20
+	}
+	vs, e := a.aparat.Shorts(ctx, fetchLimit)
 	if e != nil {
 		a.fail(e)
 		return
@@ -170,15 +177,22 @@ func (a *App) enqueue(ctx context.Context) {
 	}
 }
 
-func (a *App) enqueueMusic(ctx context.Context) {
+func (a *App) enqueueMusic(ctx context.Context) bool {
 	s := a.store.get()
 	if !s.Enabled || strings.TrimSpace(s.MusicChannelID) == "" {
-		return
+		return false
 	}
-	tracks, e := a.music.Latest(ctx, s.MusicBatchCount*4)
+	// Always inspect enough source items to move past tracks that were sent in
+	// earlier runs. With a batch size of one, limiting the source to four made
+	// the scheduler permanently stall after those first four tracks.
+	fetchLimit := s.MusicBatchCount * 4
+	if fetchLimit < 20 {
+		fetchLimit = 20
+	}
+	tracks, e := a.music.Latest(ctx, fetchLimit)
 	if e != nil {
 		a.fail(e)
-		return
+		return false
 	}
 	queued := 0
 	for _, track := range tracks {
@@ -188,12 +202,36 @@ func (a *App) enqueueMusic(ctx context.Context) {
 				a.stats.Queued.Add(1)
 				queued++
 				if queued >= s.MusicBatchCount {
-					return
+					return true
 				}
 			default:
 				a.fail(errors.New("صف موزیک پر است"))
-				return
+				return false
 			}
+		}
+	}
+	return queued > 0
+}
+
+func (a *App) enqueueMusicUntilQueued(ctx context.Context) {
+	a.musicRetryMu.Lock()
+	defer a.musicRetryMu.Unlock()
+
+	retryDelay := time.Duration(envInt("MUSIC_RETRY_SECONDS", 10)) * time.Second
+	for {
+		s := a.store.get()
+		if !s.Enabled || strings.TrimSpace(s.MusicChannelID) == "" {
+			return
+		}
+		if a.enqueueMusic(ctx) {
+			return
+		}
+		timer := time.NewTimer(retryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
 		}
 	}
 }
@@ -245,7 +283,12 @@ func (a *App) process(ctx context.Context, j Job) {
 	if e = a.bale.SendVideoURL(ctx, s.ChannelID, v.DownloadURL, a.captionFor(s)); e != nil {
 		var be *BaleError
 		if errors.As(e, &be) && be.StatusCode == http.StatusRequestEntityTooLarge {
-			a.skip(v.ID, e)
+			// A 413 is permanent for this video. Remember it and immediately
+			// refill a single-item batch so the worker keeps trying until one
+			// candidate is accepted by Bale.
+			if a.skip(v.ID, e) && s.BatchCount == 1 {
+				a.enqueue(ctx)
+			}
 			return
 		}
 		a.fail(e)
@@ -264,15 +307,23 @@ func (a *App) processMusic(ctx context.Context, j MusicJob) {
 		return
 	}
 	s := a.store.get()
+	retry := func() {
+		if s.MusicBatchCount == 1 {
+			a.enqueueMusicUntilQueued(ctx)
+		}
+	}
 	maxBytes := s.MaxAudioMB << 20
 	if maxBytes > 0 {
 		size, err := contentLength(ctx, a.client, j.Track.AudioURL)
 		if err != nil {
-			a.fail(err)
-			return
+			// Some iTunes CDN hosts intermittently fail or reject HEAD while the
+			// actual audio URL remains downloadable. Let Bale try the URL; a real
+			// size violation is still handled by its 413 response below.
+			log.Printf("هشدار: حجم موزیک قابل بررسی نبود: %v", err)
 		}
-		if size > maxBytes {
+		if err == nil && size > maxBytes {
 			a.skip(id, errors.New("حجم موزیک بیشتر از سقف تنظیم‌شده است"))
+			retry()
 			return
 		}
 	}
@@ -281,9 +332,11 @@ func (a *App) processMusic(ctx context.Context, j MusicJob) {
 			var be *BaleError
 			if errors.As(e, &be) && be.StatusCode == http.StatusRequestEntityTooLarge {
 				a.skip(id, e)
+				retry()
 				return
 			}
 			a.fail(e)
+			retry()
 			return
 		}
 	}
@@ -291,9 +344,11 @@ func (a *App) processMusic(ctx context.Context, j MusicJob) {
 		var be *BaleError
 		if errors.As(e, &be) && be.StatusCode == http.StatusRequestEntityTooLarge {
 			a.skip(id, e)
+			retry()
 			return
 		}
 		a.fail(e)
+		retry()
 		return
 	}
 	if e := a.store.markSent(id); e != nil {
@@ -303,11 +358,13 @@ func (a *App) processMusic(ctx context.Context, j MusicJob) {
 	a.stats.Sent.Add(1)
 }
 
-func (a *App) skip(id string, reason error) {
+func (a *App) skip(id string, reason error) bool {
 	log.Printf("رد شد: %s: %v", id, reason)
 	if e := a.store.markSent(id); e != nil {
 		a.fail(e)
+		return false
 	}
+	return true
 }
 
 func contentLength(ctx context.Context, client *http.Client, link string) (int64, error) {

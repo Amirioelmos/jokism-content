@@ -1,6 +1,99 @@
 package app
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+)
+
+type retryMusicSource struct{ calls int }
+
+func (s *retryMusicSource) Latest(context.Context, int) ([]Track, error) {
+	s.calls++
+	if s.calls == 1 {
+		return nil, errors.New("temporary source error")
+	}
+	return []Track{{ID: "next", AudioURL: "https://cdn.example/next.mp3"}}, nil
+}
+
+func TestEnqueueMusicRetriesUntilTrackIsQueued(t *testing.T) {
+	t.Setenv("MUSIC_RETRY_SECONDS", "1")
+	settings := defaults()
+	settings.MusicChannelID = "@music"
+	settings.MusicBatchCount = 1
+	source := &retryMusicSource{}
+	a := &App{
+		store:     &Store{Settings: settings, Sent: map[string]time.Time{}},
+		music:     source,
+		musicJobs: make(chan MusicJob, 1),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	a.enqueueMusicUntilQueued(ctx)
+
+	if source.calls != 2 {
+		t.Fatalf("source calls = %d", source.calls)
+	}
+	select {
+	case job := <-a.musicJobs:
+		if job.Track.ID != "next" {
+			t.Fatalf("queued track = %q", job.Track.ID)
+		}
+	default:
+		t.Fatal("no music job queued")
+	}
+}
+
+func TestLatestITunesChoosesAnotherPageWithoutCategory(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/cnt/track/":
+			requests++
+			if got := r.URL.Query().Get("genre"); got != "" {
+				t.Errorf("genre query = %q", got)
+			}
+			if got := r.URL.Query().Get("page_size"); got != "20" {
+				t.Errorf("page_size = %q", got)
+			}
+			if requests == 1 {
+				_, _ = w.Write([]byte(`{"count":100,"results":[{"id":1,"title":"first","audio_hq":"https://cdn.example/first.mp3"}]}`))
+				return
+			}
+			if got := r.URL.Query().Get("page"); got != "4" {
+				t.Errorf("page = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"count":100,"results":[{"id":10,"title":"آواز","audio_hq":"https://cdn.example/song.mp3"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := &MusicClient{client: server.Client(), base: server.URL, pick: func(n int) int {
+		if n != 4 {
+			t.Fatalf("other page count = %d", n)
+		}
+		return 2
+	}}
+	tracks, err := client.latestITunes(context.Background(), 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d", requests)
+	}
+	if len(tracks) != 1 {
+		t.Fatalf("tracks len = %d", len(tracks))
+	}
+	if tracks[0].ID != "itunes:10" {
+		t.Fatalf("track id = %q", tracks[0].ID)
+	}
+}
 
 func TestParseRadioJavanTrack(t *testing.T) {
 	html := `<html>
